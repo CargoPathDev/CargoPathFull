@@ -1,0 +1,95 @@
+{
+  "expo": {
+    "name": "CargoPaths",
+    "slug": "cargopaths",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "cargopaths",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cargopaths.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "CargoPaths needs your location to provide navigation and route guidance based on your vehicle dimensions.",
+        "NSLocationAlwaysUsageDescription": "CargoPaths needs background location access for continuous navigation while driving.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "CargoPaths needs location access for turn-by-turn navigation.",
+        "UIBackgroundModes": ["location", "audio"],
+        "NSMicrophoneUsageDescription": "CargoPaths needs microphone access for voice commands.",
+        "UISupportedExternalAccessoryProtocols": [],
+        "UIRequiresFullScreen": false
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.cargopaths.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#0a0a0a"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "RECORD_AUDIO",
+        "VIBRATE",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "YOUR_GOOGLE_MAPS_API_KEY"
+        }
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0a0a0a"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "CargoPaths needs your location for navigation.",
+          "locationAlwaysPermission": "CargoPaths needs background location for continuous navigation.",
+          "locationWhenInUsePermission": "CargoPaths needs your location to show your position on the map.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "your-project-id"
+      },
+      "carplay": {
+        "enabled": true,
+        "scenes": ["navigation", "audio"]
+      },
+      "androidAuto": {
+        "enabled": true,
+        "minCarApiLevel": 1
+      }
+    }
+  }
+}
