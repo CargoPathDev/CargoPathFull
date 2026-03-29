@@ -473,7 +473,12 @@ async def get_active_vehicle(request: Request):
 @api_router.get("/alerts", response_model=List[RoadAlertResponse])
 async def get_alerts(lat: Optional[float] = None, lng: Optional[float] = None, radius_km: float = 10):
     query = {"is_active": True}
-    alerts = await db.road_alerts.find(query).to_list(500)
+    alerts = await db.road_alerts.find(query, {
+        '_id': 1, 'alert_type': 1, 'latitude': 1, 'longitude': 1, 
+        'description': 1, 'speed_limit': 1, 'time_restriction_start': 1, 
+        'time_restriction_end': 1, 'diversion_info': 1, 'estimated_end_date': 1,
+        'created_by': 1, 'created_at': 1, 'upvotes': 1, 'is_active': 1
+    }).to_list(500)
     return [
         RoadAlertResponse(
             id=str(a["_id"]),
@@ -533,7 +538,10 @@ async def upvote_alert(alert_id: str, request: Request):
 # Road Restrictions (mock data for demonstration)
 @api_router.get("/restrictions", response_model=List[RoadRestrictionResponse])
 async def get_restrictions(lat: Optional[float] = None, lng: Optional[float] = None, radius_km: float = 10):
-    restrictions = await db.road_restrictions.find({"is_active": True}).to_list(500)
+    restrictions = await db.road_restrictions.find({"is_active": True}, {
+        '_id': 1, 'restriction_type': 1, 'latitude': 1, 'longitude': 1,
+        'limit_value': 1, 'description': 1, 'is_active': 1
+    }).to_list(500)
     return [
         RoadRestrictionResponse(
             id=str(r["_id"]),
@@ -758,7 +766,9 @@ async def get_optimized_route(request: Request):
         
         # Check for road restrictions along the route
         # Get all restrictions in a bounding box around the route
-        restrictions = await db.restrictions.find({"is_active": True}).to_list(1000)
+        restrictions = await db.restrictions.find({"is_active": True}, {
+            'restriction_type': 1, 'latitude': 1, 'longitude': 1, 'limit_value': 1
+        }).limit(500).to_list(500)
         
         # Filter routes that avoid restrictions based on vehicle dimensions
         safe_routes = []
@@ -904,7 +914,13 @@ async def get_roadworks(status: Optional[str] = None):
     else:
         query["status"] = {"$in": ["approved", "active"]}
     
-    roadworks = await db.roadworks.find(query).to_list(500)
+    roadworks = await db.roadworks.find(query, {
+        '_id': 1, 'work_type': 1, 'latitude': 1, 'longitude': 1, 'end_latitude': 1,
+        'end_longitude': 1, 'description': 1, 'company_name': 1, 'start_date': 1,
+        'estimated_end_date': 1, 'diversion_route': 1, 'affected_lanes': 1,
+        'working_hours': 1, 'contact_phone': 1, 'status': 1, 'created_by': 1,
+        'created_at': 1, 'verified': 1
+    }).to_list(500)
     return [
         RoadWorkResponse(
             id=str(rw["_id"]),
@@ -1071,7 +1087,7 @@ async def get_all_users(request: Request, skip: int = 0, limit: int = 50):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    users = await db.users.find().skip(skip).limit(limit).to_list(limit)
+    users = await db.users.find({}, {'password_hash': 0}).skip(skip).limit(limit).to_list(limit)
     total = await db.users.count_documents({})
     
     # Calculate trial status for each user
@@ -1324,7 +1340,10 @@ async def get_points_history(request: Request, limit: int = 20):
 # Rewards Store
 @api_router.get("/rewards")
 async def get_rewards():
-    rewards = await db.rewards.find({"is_active": True}).to_list(100)
+    rewards = await db.rewards.find({"is_active": True}, {
+        'name': 1, 'type': 1, 'cost': 1, 'icon': 1, 'color': 1,
+        'voice_id': 1, 'is_active': 1
+    }).to_list(100)
     
     if not rewards:
         # Seed default rewards
