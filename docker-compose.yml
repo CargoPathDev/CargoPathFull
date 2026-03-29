@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URL=mongodb://mongo:27017/cargo_paths_db
+      - DB_NAME=cargo_paths_db
+      - JWT_SECRET=dev-secret-key-change-in-production
+      - ADMIN_EMAIL=admin@cargopaths.com
+      - ADMIN_PASSWORD=admin123
+      - ENVIRONMENT=development
+      - HOST=0.0.0.0
+      - PORT=8000
+    depends_on:
+      - mongo
+    volumes:
+      - ./backend:/app
+    networks:
+      - cargo-network
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: cargo_paths_db
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - cargo-network
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+
+networks:
+  cargo-network:
+    driver: bridge
