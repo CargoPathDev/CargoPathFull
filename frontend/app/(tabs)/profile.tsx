@@ -14,6 +14,7 @@ import { useRouter } from 'expo-router';
 import { useAuth } from '../../contexts/AuthContext';
 import { subscriptionApi } from '../../services/api';
 import { Subscription } from '../../types';
+import { useStripe } from '@stripe/stripe-react-native';
 
 const plans = [
   {
@@ -64,6 +65,7 @@ const plans = [
 export default function ProfileScreen() {
   const { user, logout, refreshUser, isGuest } = useAuth();
   const router = useRouter();
+  const { initPaymentSheet, presentPaymentSheet } = useStripe();
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpgrading, setIsUpgrading] = useState(false);
@@ -98,22 +100,89 @@ export default function ProfileScreen() {
       return;
     }
 
+    // Handle free tier (downgrade)
+    if (tier === 'free') {
+      Alert.alert(
+        'Downgrade Plan',
+        `Are you sure you want to switch to the Free plan?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Confirm',
+            onPress: async () => {
+              setIsUpgrading(true);
+              try {
+                await subscriptionApi.upgrade(tier);
+                await refreshUser();
+                await loadSubscription();
+                Alert.alert('Success', 'Your plan has been updated to Free');
+              } catch (error) {
+                Alert.alert('Error', 'Failed to update subscription');
+              } finally {
+                setIsUpgrading(false);
+              }
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    // Handle paid tiers (Basic/Premium) with Stripe Payment Sheet
     Alert.alert(
-      tier === 'free' ? 'Downgrade Plan' : 'Upgrade Plan',
-      `Are you sure you want to switch to the ${tier.charAt(0).toUpperCase() + tier.slice(1)} plan?`,
+      'Upgrade Plan',
+      `Upgrade to ${tier.charAt(0).toUpperCase() + tier.slice(1)} for ${tier === 'basic' ? '£4.99' : '£9.99'}/month?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Confirm',
+          text: 'Continue',
           onPress: async () => {
             setIsUpgrading(true);
             try {
-              await subscriptionApi.upgrade(tier);
+              // Create payment intent
+              const { clientSecret } = await subscriptionApi.createPaymentIntent(tier);
+              
+              // Initialize Payment Sheet
+              const { error: initError } = await initPaymentSheet({
+                paymentIntentClientSecret: clientSecret,
+                merchantDisplayName: 'CargoPaths',
+                returnURL: 'cargopaths://payment-success',
+                appearance: {
+                  colors: {
+                    primary: '#4A90E2',
+                    background: '#1a1a1a',
+                    componentBackground: '#252525',
+                    componentText: '#ffffff',
+                    primaryText: '#ffffff',
+                    secondaryText: '#888888',
+                  },
+                },
+              });
+
+              if (initError) {
+                Alert.alert('Error', initError.message);
+                setIsUpgrading(false);
+                return;
+              }
+
+              // Present Payment Sheet
+              const { error: presentError } = await presentPaymentSheet();
+
+              if (presentError) {
+                Alert.alert('Payment Cancelled', presentError.message);
+                setIsUpgrading(false);
+                return;
+              }
+
+              // Payment successful - confirm on backend
               await refreshUser();
               await loadSubscription();
-              Alert.alert('Success', `Your plan has been updated to ${tier}`);
-            } catch (error) {
-              Alert.alert('Error', 'Failed to update subscription');
+              Alert.alert(
+                'Success! 🎉',
+                `You're now on the ${tier.charAt(0).toUpperCase() + tier.slice(1)} plan!`
+              );
+            } catch (error: any) {
+              Alert.alert('Error', error?.message || 'Failed to process payment');
             } finally {
               setIsUpgrading(false);
             }

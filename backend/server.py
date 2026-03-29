@@ -16,9 +16,17 @@ import jwt
 from bson import ObjectId
 import secrets
 import stripe
+import googlemaps
+from elevenlabs import ElevenLabs
 
 # Initialize Stripe with secret key from environment
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+# Initialize Google Maps client
+gmaps = googlemaps.Client(key=os.environ.get("GOOGLE_MAPS_API_KEY", ""))
+
+# Initialize ElevenLabs client
+elevenlabs_client = ElevenLabs(api_key=os.environ.get("ELEVENLABS_API_KEY", ""))
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
@@ -638,6 +646,43 @@ async def get_subscription(request: Request):
         }
     }
 
+@api_router.post("/create-payment-intent")
+async def create_payment_intent(request: Request):
+    """Create a Stripe Payment Intent for subscription upgrade"""
+    user = await get_current_user(request)
+    body = await request.json()
+    tier = body.get("tier")
+    
+    if tier not in ["basic", "premium"]:
+        raise HTTPException(status_code=400, detail="Invalid subscription tier")
+    
+    # Pricing in pence (Stripe uses smallest currency unit)
+    prices = {
+        "basic": 499,  # £4.99
+        "premium": 999,  # £9.99
+    }
+    
+    try:
+        # Create Stripe Payment Intent
+        payment_intent = stripe.PaymentIntent.create(
+            amount=prices[tier],
+            currency="gbp",
+            metadata={
+                "user_id": str(user["_id"]),
+                "user_email": user["email"],
+                "subscription_tier": tier,
+            },
+            description=f"CargoPaths {tier.capitalize()} Subscription",
+        )
+        
+        return {
+            "clientSecret": payment_intent.client_secret,
+            "amount": prices[tier],
+            "tier": tier,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment intent creation failed: {str(e)}")
+
 @api_router.post("/subscription/upgrade")
 async def upgrade_subscription(subscription: SubscriptionUpdate, request: Request):
     user = await get_current_user(request)
@@ -645,13 +690,210 @@ async def upgrade_subscription(subscription: SubscriptionUpdate, request: Reques
     if subscription.tier not in ["free", "basic", "premium"]:
         raise HTTPException(status_code=400, detail="Invalid subscription tier")
     
-    # In production, this would integrate with Stripe
+    # Update user subscription tier
     await db.users.update_one(
         {"_id": ObjectId(user["_id"])},
         {"$set": {"subscription_tier": subscription.tier}}
     )
     
     return {"message": f"Subscription upgraded to {subscription.tier}", "tier": subscription.tier}
+
+@api_router.post("/subscription/confirm-payment")
+async def confirm_payment(request: Request):
+    """Confirm payment and activate subscription after successful Stripe payment"""
+    user = await get_current_user(request)
+    body = await request.json()
+    tier = body.get("tier")
+    payment_intent_id = body.get("payment_intent_id")
+    
+    if tier not in ["basic", "premium"]:
+        raise HTTPException(status_code=400, detail="Invalid subscription tier")
+    
+    try:
+        # Verify payment with Stripe
+        payment_intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+        
+        if payment_intent.status == "succeeded":
+            # Activate subscription
+            await db.users.update_one(
+                {"_id": ObjectId(user["_id"])},
+                {"$set": {
+                    "subscription_tier": tier,
+                    "subscription_status": "active",
+                    "subscription_updated_at": datetime.now(timezone.utc)
+                }}
+            )
+            
+            return {
+                "success": True,
+                "message": f"Subscription activated: {tier}",
+                "tier": tier
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Payment not completed")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment confirmation failed: {str(e)}")
+
+# Navigation & Maps endpoints
+@api_router.post("/navigation/optimized-route")
+async def get_optimized_route(request: Request):
+    """Get optimized route considering vehicle dimensions and road restrictions"""
+    try:
+        body = await request.json()
+        origin = body.get("origin")  # {lat, lng}
+        destination = body.get("destination")  # {lat, lng}
+        vehicle_dims = body.get("vehicle_dimensions")  # {height_meters, width_meters, weight_kg}
+        
+        # Get standard directions from Google Maps
+        directions = gmaps.directions(
+            origin=(origin["lat"], origin["lng"]),
+            destination=(destination["lat"], destination["lng"]),
+            mode="driving",
+            alternatives=True,
+        )
+        
+        if not directions:
+            raise HTTPException(status_code=404, detail="No route found")
+        
+        # Check for road restrictions along the route
+        # Get all restrictions in a bounding box around the route
+        restrictions = await db.restrictions.find({"is_active": True}).to_list(1000)
+        
+        # Filter routes that avoid restrictions based on vehicle dimensions
+        safe_routes = []
+        for route in directions:
+            is_safe = True
+            route_bounds = route["bounds"]
+            
+            # Check if any restrictions affect this vehicle
+            for restriction in restrictions:
+                # Simple bounding box check (in production, use more precise geometry)
+                if (route_bounds["southwest"]["lat"] <= restriction["latitude"] <= route_bounds["northeast"]["lat"] and
+                    route_bounds["southwest"]["lng"] <= restriction["longitude"] <= route_bounds["northeast"]["lng"]):
+                    
+                    # Check if restriction blocks this vehicle
+                    if restriction["restriction_type"] == "height" and vehicle_dims["height_meters"] > restriction["limit_value"]:
+                        is_safe = False
+                        break
+                    elif restriction["restriction_type"] == "weight" and vehicle_dims["weight_kg"] > restriction["limit_value"]:
+                        is_safe = False
+                        break
+                    elif restriction["restriction_type"] == "width" and vehicle_dims["width_meters"] > restriction["limit_value"]:
+                        is_safe = False
+                        break
+            
+            if is_safe:
+                safe_routes.append(route)
+        
+        # Return the best safe route, or the first route if all are blocked (with warning)
+        if safe_routes:
+            return {"routes": safe_routes, "warning": None}
+        else:
+            return {
+                "routes": directions,
+                "warning": "No fully compatible routes found. Routes may have restrictions for your vehicle."
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Route optimization failed: {str(e)}")
+
+# Voice Navigation endpoints (ElevenLabs Integration)
+@api_router.post("/voice/synthesize")
+async def synthesize_voice(request: Request):
+    """Convert text to speech using ElevenLabs AI voices"""
+    try:
+        user = await get_current_user(request)
+        body = await request.json()
+        text = body.get("text")
+        voice_id_name = body.get("voice", "adam")  # adam, rachel, brian
+        
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        # Map voice names to ElevenLabs voice IDs
+        voice_mapping = {
+            "adam": "pNInz6obpgDQGcFmaJgB",  # Adam - Deep, authoritative
+            "rachel": "21m00Tcm4TlvDq8ikWAM",  # Rachel - Warm, friendly
+            "brian": "nPczCjzI2devNBz1zQrb",  # Brian - Professional
+            "default": "pNInz6obpgDQGcFmaJgB"  # Default to Adam
+        }
+        
+        elevenlabs_voice_id = voice_mapping.get(voice_id_name, voice_mapping["default"])
+        
+        # Check if user has unlocked this voice (if not default)
+        if voice_id_name != "default":
+            user_settings = await db.settings.find_one({"user_id": str(user["_id"])})
+            owned_rewards = user_settings.get("owned_rewards", []) if user_settings else []
+            
+            voice_reward_ids = {
+                "adam": "adam",
+                "rachel": "rachel",
+                "brian": "brian"
+            }
+            
+            # Allow if user owns the voice or is premium
+            if voice_reward_ids.get(voice_id_name) not in owned_rewards and user.get("subscription_tier") != "premium":
+                # Use default voice instead
+                elevenlabs_voice_id = voice_mapping["default"]
+        
+        # Generate speech using ElevenLabs
+        audio = elevenlabs_client.text_to_speech.convert(
+            voice_id=elevenlabs_voice_id,
+            text=text,
+            model_id="eleven_monolingual_v1",
+        )
+        
+        # Convert generator to bytes
+        audio_bytes = b"".join(audio)
+        
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=navigation_audio.mp3"
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Voice synthesis error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Voice synthesis failed: {str(e)}")
+
+@api_router.get("/voice/preview/{voice_name}")
+async def preview_voice(voice_name: str, request: Request):
+    """Preview a voice before purchasing"""
+    try:
+        voice_mapping = {
+            "adam": "pNInz6obpgDQGcFmaJgB",
+            "rachel": "21m00Tcm4TlvDq8ikWAM",
+            "brian": "nPczCjzI2devNBz1zQrb"
+        }
+        
+        elevenlabs_voice_id = voice_mapping.get(voice_name)
+        if not elevenlabs_voice_id:
+            raise HTTPException(status_code=404, detail="Voice not found")
+        
+        preview_text = f"Hi! I'm {voice_name.capitalize()}. I'll guide you safely on your journey with CargoPaths navigation."
+        
+        audio = elevenlabs_client.text_to_speech.convert(
+            voice_id=elevenlabs_voice_id,
+            text=preview_text,
+            model_id="eleven_monolingual_v1",
+        )
+        
+        audio_bytes = b"".join(audio)
+        
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=voice_preview.mp3"
+            }
+        )
+        
+    except Exception as e:
+        logging.error(f"Voice preview error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Voice preview failed: {str(e)}")
 
 # Road Worker Portal endpoints
 @api_router.get("/roadworks", response_model=List[RoadWorkResponse])

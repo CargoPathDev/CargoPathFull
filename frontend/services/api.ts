@@ -128,6 +128,19 @@ export const subscriptionApi = {
     const response = await api.post('/api/subscription/upgrade', { tier });
     return response.data;
   },
+  
+  createPaymentIntent: async (tier: 'basic' | 'premium') => {
+    const response = await api.post('/api/create-payment-intent', { tier });
+    return response.data;
+  },
+  
+  confirmPayment: async (tier: string, paymentIntentId: string) => {
+    const response = await api.post('/api/subscription/confirm-payment', {
+      tier,
+      payment_intent_id: paymentIntentId,
+    });
+    return response.data;
+  },
 };
 
 // Road Works API (Road Worker Portal)

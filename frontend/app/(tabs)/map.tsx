@@ -6,24 +6,33 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Dimensions,
-  Platform,
+  TextInput,
+  Keyboard,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useVehicle } from '../../contexts/VehicleContext';
 import { RoadAlert, RoadRestriction } from '../../types';
 import { alertsApi, restrictionsApi } from '../../services/api';
+import { mapsService, DirectionsResult } from '../../services/maps';
 
 const { width, height } = Dimensions.get('window');
 
 export default function MapScreen() {
+  const mapRef = useRef<MapView>(null);
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoadingLocation, setIsLoadingLocation] = useState(true);
   const [alerts, setAlerts] = useState<RoadAlert[]>([]);
   const [restrictions, setRestrictions] = useState<RoadRestriction[]>([]);
-  const [showFilters, setShowFilters] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [routeCoordinates, setRouteCoordinates] = useState<Array<{ latitude: number; longitude: number }>>([]);
+  const [destination, setDestination] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [routeInfo, setRouteInfo] = useState<{ distance: string; duration: string } | null>(null);
   const { activeVehicle } = useVehicle();
 
   useEffect(() => {
@@ -45,6 +54,16 @@ export default function MapScreen() {
         accuracy: Location.Accuracy.High,
       });
       setLocation(currentLocation);
+
+      // Center map on user location
+      if (mapRef.current && currentLocation) {
+        mapRef.current.animateToRegion({
+          latitude: currentLocation.coords.latitude,
+          longitude: currentLocation.coords.longitude,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
+        });
+      }
     } catch (error) {
       setErrorMsg('Failed to get location');
     } finally {
@@ -65,55 +84,159 @@ export default function MapScreen() {
     }
   };
 
-  const getAlertIcon = (type: string) => {
-    switch (type) {
-      case 'speed_camera':
-        return 'camera';
-      case 'roadwork':
-        return 'construct';
-      case 'hazard':
-        return 'warning';
-      case 'school_zone':
-        return 'school';
-      case 'bump':
-        return 'trending-up';
-      case 'traffic_light':
-        return 'ellipse';
-      default:
-        return 'alert-circle';
+  const handleSearch = async () => {
+    if (!searchQuery.trim() || !location) return;
+
+    Keyboard.dismiss();
+    setIsLoadingLocation(true);
+
+    try {
+      const results = await mapsService.searchPlaces(searchQuery, {
+        lat: location.coords.latitude,
+        lng: location.coords.longitude,
+      });
+
+      if (results && results.length > 0) {
+        const place = results[0];
+        const destLocation = {
+          latitude: place.geometry.location.lat,
+          longitude: place.geometry.location.lng,
+        };
+
+        setDestination(destLocation);
+        setShowSearch(false);
+        await startNavigation(destLocation);
+      }
+    } catch (error) {
+      console.error('Search failed:', error);
+    } finally {
+      setIsLoadingLocation(false);
     }
   };
 
-  const getRestrictionIcon = (type: string) => {
+  const startNavigation = async (dest: { latitude: number; longitude: number }) => {
+    if (!location) return;
+
+    setIsNavigating(true);
+
+    try {
+      const origin = {
+        lat: location.coords.latitude,
+        lng: location.coords.longitude,
+      };
+      
+      const destination = {
+        lat: dest.latitude,
+        lng: dest.longitude,
+      };
+
+      let directionsResult: DirectionsResult;
+
+      // Use optimized route if vehicle is active
+      if (activeVehicle) {
+        directionsResult = await mapsService.getOptimizedRoute(origin, destination, {
+          height_meters: activeVehicle.height_meters,
+          width_meters: activeVehicle.width_meters,
+          weight_kg: activeVehicle.weight_kg,
+        });
+      } else {
+        directionsResult = await mapsService.getDirections(origin, destination);
+      }
+
+      if (directionsResult.routes && directionsResult.routes.length > 0) {
+        const route = directionsResult.routes[0];
+        const points = mapsService.decodePolyline(route.overview_polyline.points);
+        setRouteCoordinates(points);
+
+        // Get route info
+        if (route.legs && route.legs.length > 0) {
+          const leg = route.legs[0];
+          setRouteInfo({
+            distance: leg.distance.text,
+            duration: leg.duration.text,
+          });
+        }
+
+        // Fit map to route
+        if (mapRef.current) {
+          mapRef.current.fitToCoordinates(points, {
+            edgePadding: { top: 100, right: 50, bottom: 300, left: 50 },
+            animated: true,
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Navigation failed:', error);
+    } finally {
+      setIsNavigating(false);
+    }
+  };
+
+  const clearNavigation = () => {
+    setRouteCoordinates([]);
+    setDestination(null);
+    setRouteInfo(null);
+    setSearchQuery('');
+  };
+
+  const getAlertIcon = (type: string) => {
     switch (type) {
-      case 'height':
-        return 'resize-outline';
-      case 'weight':
-        return 'barbell';
-      case 'width':
-        return 'swap-horizontal';
-      default:
-        return 'ban';
+      case 'speed_camera': return 'camera';
+      case 'roadwork': return 'construct';
+      case 'hazard': return 'warning';
+      case 'school_zone': return 'school';
+      case 'bump': return 'trending-up';
+      case 'traffic_light': return 'ellipse';
+      default: return 'alert-circle';
+    }
+  };
+
+  const getMarkerColor = (type: string) => {
+    switch (type) {
+      case 'speed_camera': return '#FFD700';
+      case 'roadwork': return '#FF6B6B';
+      case 'hazard': return '#FF4500';
+      case 'school_zone': return '#4A90E2';
+      default: return '#888';
     }
   };
 
   const checkVehicleRestrictions = () => {
     if (!activeVehicle) return [];
     return restrictions.filter((r) => {
-      if (r.restriction_type === 'height' && activeVehicle.height_meters > r.limit_value) {
-        return true;
-      }
-      if (r.restriction_type === 'weight' && activeVehicle.weight_kg > r.limit_value) {
-        return true;
-      }
-      if (r.restriction_type === 'width' && activeVehicle.width_meters > r.limit_value) {
-        return true;
-      }
+      if (r.restriction_type === 'height' && activeVehicle.height_meters > r.limit_value) return true;
+      if (r.restriction_type === 'weight' && activeVehicle.weight_kg > r.limit_value) return true;
+      if (r.restriction_type === 'width' && activeVehicle.width_meters > r.limit_value) return true;
       return false;
     });
   };
 
   const blockedRestrictions = checkVehicleRestrictions();
+
+  if (isLoadingLocation && !location) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#4A90E2" />
+          <Text style={styles.loadingText}>Loading map...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (errorMsg || !location) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.errorContainer}>
+          <Ionicons name="location-outline" size={60} color="#666" />
+          <Text style={styles.errorText}>{errorMsg || 'Location unavailable'}</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={requestLocationPermission}>
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -124,21 +247,36 @@ export default function MapScreen() {
             <>
               <Ionicons name="car-sport" size={20} color="#4A90E2" />
               <Text style={styles.vehicleName}>{activeVehicle.name}</Text>
-              <View style={styles.vehicleBadge}>
-                <Text style={styles.vehicleBadgeText}>{activeVehicle.vehicle_type}</Text>
-              </View>
             </>
           ) : (
             <Text style={styles.noVehicle}>No vehicle selected</Text>
           )}
         </View>
         <TouchableOpacity
-          style={styles.filterButton}
-          onPress={() => setShowFilters(!showFilters)}
+          style={styles.searchButton}
+          onPress={() => setShowSearch(!showSearch)}
         >
-          <Ionicons name="options" size={24} color="#fff" />
+          <Ionicons name="search" size={24} color="#fff" />
         </TouchableOpacity>
       </View>
+
+      {/* Search Bar */}
+      {showSearch && (
+        <View style={styles.searchBar}>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search destination..."
+            placeholderTextColor="#666"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleSearch}
+            autoFocus
+          />
+          <TouchableOpacity style={styles.searchSubmitButton} onPress={handleSearch}>
+            <Ionicons name="arrow-forward" size={24} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Vehicle Restrictions Warning */}
       {blockedRestrictions.length > 0 && (
@@ -150,111 +288,113 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* Map Area */}
-      <View style={styles.mapContainer}>
-        {isLoadingLocation ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#4A90E2" />
-            <Text style={styles.loadingText}>Getting your location...</Text>
-          </View>
-        ) : errorMsg ? (
-          <View style={styles.errorContainer}>
-            <Ionicons name="location-outline" size={60} color="#666" />
-            <Text style={styles.errorText}>{errorMsg}</Text>
-            <TouchableOpacity style={styles.retryButton} onPress={requestLocationPermission}>
-              <Text style={styles.retryButtonText}>Retry</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.mapPlaceholder}>
-            <Ionicons name="map" size={80} color="#4A90E2" />
-            <Text style={styles.mapPlaceholderText}>Map View</Text>
-            {location && (
-              <View style={styles.locationInfo}>
-                <Text style={styles.locationText}>
-                  Lat: {location.coords.latitude.toFixed(4)}
-                </Text>
-                <Text style={styles.locationText}>
-                  Lng: {location.coords.longitude.toFixed(4)}
-                </Text>
-              </View>
-            )}
-            
-            {/* Mock map with alerts display */}
-            <View style={styles.alertsPreview}>
-              <Text style={styles.alertsTitle}>Nearby Alerts ({alerts.length})</Text>
-              {alerts.slice(0, 3).map((alert) => (
-                <View key={alert.id} style={styles.alertItem}>
-                  <Ionicons
-                    name={getAlertIcon(alert.alert_type) as any}
-                    size={16}
-                    color="#FFD700"
-                  />
-                  <Text style={styles.alertItemText}>{alert.description}</Text>
-                </View>
-              ))}
-            </View>
+      {/* Route Info */}
+      {routeInfo && (
+        <View style={styles.routeInfo}>
+          <Ionicons name="navigate" size={20} color="#4A90E2" />
+          <Text style={styles.routeText}>
+            {routeInfo.distance} • {routeInfo.duration}
+          </Text>
+          <TouchableOpacity onPress={clearNavigation}>
+            <Ionicons name="close-circle" size={24} color="#FF6B6B" />
+          </TouchableOpacity>
+        </View>
+      )}
 
-            {/* Restrictions preview */}
-            <View style={styles.restrictionsPreview}>
-              <Text style={styles.alertsTitle}>Road Restrictions ({restrictions.length})</Text>
-              {restrictions.slice(0, 3).map((restriction) => (
-                <View
-                  key={restriction.id}
-                  style={[
-                    styles.restrictionItem,
-                    blockedRestrictions.includes(restriction) && styles.blockedRestriction,
-                  ]}
-                >
-                  <Ionicons
-                    name={getRestrictionIcon(restriction.restriction_type) as any}
-                    size={16}
-                    color={blockedRestrictions.includes(restriction) ? '#FF6B6B' : '#4A90E2'}
-                  />
-                  <Text style={styles.restrictionItemText}>
-                    {restriction.restriction_type}: {restriction.limit_value}
-                    {restriction.restriction_type === 'weight' ? 'kg' : 'm'}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          </View>
+      {/* Google Maps */}
+      <MapView
+        ref={mapRef}
+        style={styles.map}
+        provider={PROVIDER_GOOGLE}
+        initialRegion={{
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
+        }}
+        showsUserLocation
+        showsMyLocationButton={false}
+        showsTraffic
+      >
+        {/* Route Polyline */}
+        {routeCoordinates.length > 0 && (
+          <Polyline
+            coordinates={routeCoordinates}
+            strokeColor="#4A90E2"
+            strokeWidth={4}
+          />
         )}
-      </View>
+
+        {/* Destination Marker */}
+        {destination && (
+          <Marker coordinate={destination} title="Destination">
+            <View style={styles.destinationMarker}>
+              <Ionicons name="flag" size={30} color="#27AE60" />
+            </View>
+          </Marker>
+        )}
+
+        {/* Alert Markers */}
+        {alerts.map((alert) => (
+          <Marker
+            key={alert.id}
+            coordinate={{
+              latitude: alert.latitude,
+              longitude: alert.longitude,
+            }}
+            title={alert.alert_type}
+            description={alert.description}
+          >
+            <View style={[styles.markerContainer, { backgroundColor: getMarkerColor(alert.alert_type) }]}>
+              <Ionicons name={getAlertIcon(alert.alert_type) as any} size={20} color="#fff" />
+            </View>
+          </Marker>
+        ))}
+
+        {/* Restriction Markers */}
+        {restrictions.map((restriction) => (
+          <Marker
+            key={restriction.id}
+            coordinate={{
+              latitude: restriction.latitude,
+              longitude: restriction.longitude,
+            }}
+            title={`${restriction.restriction_type} restriction`}
+            description={`Limit: ${restriction.limit_value}${restriction.restriction_type === 'weight' ? 'kg' : 'm'}`}
+          >
+            <View
+              style={[
+                styles.restrictionMarker,
+                blockedRestrictions.includes(restriction) && styles.blockedMarker,
+              ]}
+            >
+              <Ionicons name="ban" size={20} color="#fff" />
+            </View>
+          </Marker>
+        ))}
+      </MapView>
 
       {/* Quick Actions */}
       <View style={styles.quickActions}>
-        <TouchableOpacity style={styles.actionButton}>
-          <Ionicons name="search" size={24} color="#fff" />
-          <Text style={styles.actionText}>Search</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.actionButton} onPress={requestLocationPermission}>
-          <Ionicons name="locate" size={24} color="#fff" />
-          <Text style={styles.actionText}>My Location</Text>
+        <TouchableOpacity
+          style={styles.actionButton}
+          onPress={() => {
+            if (mapRef.current && location) {
+              mapRef.current.animateToRegion({
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+                latitudeDelta: 0.05,
+                longitudeDelta: 0.05,
+              });
+            }
+          }}
+        >
+          <Ionicons name="locate" size={28} color="#4A90E2" />
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionButton} onPress={loadAlertsAndRestrictions}>
-          <Ionicons name="refresh" size={24} color="#fff" />
-          <Text style={styles.actionText}>Refresh</Text>
+          <Ionicons name="refresh" size={28} color="#4A90E2" />
         </TouchableOpacity>
       </View>
-
-      {/* Vehicle Stats (when vehicle is active) */}
-      {activeVehicle && (
-        <View style={styles.vehicleStats}>
-          <View style={styles.statItem}>
-            <Ionicons name="resize-outline" size={16} color="#4A90E2" />
-            <Text style={styles.statText}>H: {activeVehicle.height_meters}m</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Ionicons name="swap-horizontal" size={16} color="#4A90E2" />
-            <Text style={styles.statText}>W: {activeVehicle.width_meters}m</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Ionicons name="barbell" size={16} color="#4A90E2" />
-            <Text style={styles.statText}>{activeVehicle.weight_kg}kg</Text>
-          </View>
-        </View>
-      )}
     </SafeAreaView>
   );
 }
@@ -271,6 +411,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     backgroundColor: '#1a1a1a',
+    zIndex: 10,
   },
   vehicleInfo: {
     flexDirection: 'row',
@@ -283,23 +424,36 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 8,
   },
-  vehicleBadge: {
-    backgroundColor: '#333',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 12,
-    marginLeft: 8,
-  },
-  vehicleBadgeText: {
-    color: '#888',
-    fontSize: 12,
-  },
   noVehicle: {
     color: '#888',
     fontSize: 14,
   },
-  filterButton: {
+  searchButton: {
     padding: 8,
+  },
+  searchBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#1a1a1a',
+    gap: 8,
+    zIndex: 10,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: '#252525',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    color: '#fff',
+    fontSize: 16,
+  },
+  searchSubmitButton: {
+    backgroundColor: '#4A90E2',
+    borderRadius: 12,
+    width: 48,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   warningBanner: {
     flexDirection: 'row',
@@ -308,12 +462,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 8,
+    zIndex: 10,
   },
   warningText: {
     color: '#FFD700',
     fontSize: 14,
   },
-  mapContainer: {
+  routeInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 12,
+    zIndex: 10,
+  },
+  routeText: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  map: {
     flex: 1,
   },
   loadingContainer: {
@@ -347,107 +517,51 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
   },
-  mapPlaceholder: {
-    flex: 1,
-    backgroundColor: '#1a1a1a',
+  markerContainer: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    borderWidth: 2,
+    borderColor: '#fff',
   },
-  mapPlaceholderText: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginTop: 16,
-  },
-  locationInfo: {
-    marginTop: 16,
+  restrictionMarker: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FF6B6B',
+    justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
   },
-  locationText: {
-    color: '#888',
-    fontSize: 14,
+  blockedMarker: {
+    backgroundColor: '#FF4500',
+    borderColor: '#FFD700',
+    borderWidth: 3,
   },
-  alertsPreview: {
-    width: '100%',
-    backgroundColor: '#252525',
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 20,
-  },
-  alertsTitle: {
-    color: '#fff',
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  alertItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
-    gap: 8,
-  },
-  alertItemText: {
-    color: '#ccc',
-    fontSize: 13,
-    flex: 1,
-  },
-  restrictionsPreview: {
-    width: '100%',
-    backgroundColor: '#252525',
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 12,
-  },
-  restrictionItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
-    gap: 8,
-  },
-  blockedRestriction: {
-    backgroundColor: 'rgba(255, 107, 107, 0.1)',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    marginHorizontal: -8,
-  },
-  restrictionItemText: {
-    color: '#ccc',
-    fontSize: 13,
-    flex: 1,
+  destinationMarker: {
+    width: 40,
+    height: 40,
   },
   quickActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    backgroundColor: '#1a1a1a',
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#333',
+    position: 'absolute',
+    right: 16,
+    bottom: 32,
+    gap: 12,
   },
   actionButton: {
-    alignItems: 'center',
-    padding: 8,
-  },
-  actionText: {
-    color: '#888',
-    fontSize: 12,
-    marginTop: 4,
-  },
-  vehicleStats: {
-    flexDirection: 'row',
-    justifyContent: 'center',
     backgroundColor: '#1a1a1a',
-    paddingVertical: 8,
-    gap: 24,
-    borderTopWidth: 1,
-    borderTopColor: '#333',
-  },
-  statItem: {
-    flexDirection: 'row',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 4,
-  },
-  statText: {
-    color: '#888',
-    fontSize: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
   },
 });

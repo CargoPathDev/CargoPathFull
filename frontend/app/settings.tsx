@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { UserSettings } from '../types';
 import { settingsApi } from '../services/api';
+import { useVoice } from '../contexts/VoiceContext';
 
 const voiceOptions = [
   { id: 'default', name: 'Default Voice', icon: 'mic' },
@@ -31,6 +32,7 @@ const soundModes = [
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const { currentVoice, setVoice, previewVoice, isVoiceEnabled, toggleVoice } = useVoice();
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
